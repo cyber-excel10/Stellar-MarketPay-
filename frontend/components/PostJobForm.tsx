@@ -24,9 +24,8 @@ import FeeEstimationModal from "@/components/FeeEstimationModal";
 import { createJob, updateJobEscrowId, deleteJob } from "@/lib/api";
 import { usePriceContext } from "@/contexts/PriceContext";
 
-// ---------------------------------------------------------------------------
-// Types
-// ---------------------------------------------------------------------------
+const DRAFT_STORAGE_KEY = "marketpay_post_job_draft";
+const AUTOSAVE_INTERVAL_MS = 30_000;
 
 interface JobFormData {
   title: string;
@@ -134,9 +133,26 @@ function ProgressBar({ step }: { step: Step }) {
   );
 }
 
-// ---------------------------------------------------------------------------
-// Main component
-// ---------------------------------------------------------------------------
+function loadLocalDraft(): JobFormData | null {
+  if (typeof window === "undefined") return null;
+  try {
+    const raw = localStorage.getItem(DRAFT_STORAGE_KEY);
+    if (!raw) return null;
+    return JSON.parse(raw) as JobFormData;
+  } catch {
+    return null;
+  }
+}
+
+function hasFormContent(form: JobFormData): boolean {
+  return Boolean(
+    form.title.trim() ||
+      form.description.trim() ||
+      form.skills.trim() ||
+      form.deadline ||
+      form.budgetXlm !== 50
+  );
+}
 
 interface PostJobFormProps {
   publicKey: string;

@@ -6,17 +6,39 @@ import {
   Address,
   nativeToScVal,
   xdr,
+  Horizon,
 } from "@stellar/stellar-sdk";
 import * as SorobanRpc from "@stellar/stellar-sdk/rpc";
+import { optionalClientEnv, requireClientEnv } from "./env";
 
 // ---------------------------------------------------------------------------
 // Config
 // ---------------------------------------------------------------------------
 
-const NETWORK_PASSPHRASE = Networks.TESTNET;
-const HORIZON_URL = "https://horizon-testnet.stellar.org";
-const SOROBAN_RPC_URL = "https://soroban-testnet.stellar.org";
-const CONTRACT_ID = process.env.NEXT_PUBLIC_CONTRACT_ID ?? "";
+const NETWORK_NAME = optionalClientEnv("NEXT_PUBLIC_STELLAR_NETWORK", "testnet").toLowerCase();
+if (NETWORK_NAME !== "testnet" && NETWORK_NAME !== "mainnet") {
+  throw new Error("NEXT_PUBLIC_STELLAR_NETWORK must be either testnet or mainnet.");
+}
+
+const NETWORK_PASSPHRASE = NETWORK_NAME === "mainnet" ? Networks.PUBLIC : Networks.TESTNET;
+const HORIZON_URL = optionalClientEnv(
+  "NEXT_PUBLIC_HORIZON_URL",
+  NETWORK_NAME === "mainnet"
+    ? "https://horizon.stellar.org"
+    : "https://horizon-testnet.stellar.org",
+);
+const SOROBAN_RPC_URL = optionalClientEnv(
+  "NEXT_PUBLIC_SOROBAN_RPC_URL",
+  NETWORK_NAME === "mainnet"
+    ? "https://soroban-mainnet.stellar.org"
+    : "https://soroban-testnet.stellar.org",
+);
+const CONTRACT_ID =
+  process.env.NEXT_PUBLIC_USE_CONTRACT_MOCK === "true"
+    ? ""
+    : requireClientEnv("NEXT_PUBLIC_CONTRACT_ID");
+
+export const server = new Horizon.Server(HORIZON_URL, { allowHttp: false });
 
 // ---------------------------------------------------------------------------
 // Types
@@ -36,6 +58,26 @@ export interface EscrowResult {
   txHash: string;
 }
 
+export interface MarketPayTransaction {
+  id: string;
+  hash: string;
+  ledger: number;
+  created_at: string;
+  from: string;
+  to: string;
+  amount: string;
+  asset: string;
+  memo?: string;
+  memo_type?: string;
+  successful: boolean;
+  marketPayType?: "escrow" | "payment" | "refund" | "other";
+}
+
+export interface FetchTransactionsResponse {
+  transactions: MarketPayTransaction[];
+  hasMore: boolean;
+}
+
 // ---------------------------------------------------------------------------
 // Freighter helpers (browser-only)
 // ---------------------------------------------------------------------------
@@ -46,14 +88,13 @@ async function getFreighter() {
   }
   // Freighter injects window.freighter; fall back to @stellar/freighter-api
   // when the extension is installed it patches the global.
-  const { isConnected, getPublicKey, signTransaction } = await import(
-    "@stellar/freighter-api"
-  );
+  const { isConnected, getPublicKey, signTransaction } =
+    await import("@stellar/freighter-api");
 
   const connected = await isConnected();
   if (!connected) {
     throw new Error(
-      "Freighter wallet not found. Please install the Freighter extension."
+      "Freighter wallet not found. Please install the Freighter extension.",
     );
   }
   return { getPublicKey, signTransaction };
@@ -65,19 +106,19 @@ async function getFreighter() {
 
 /**
  * Builds, simulates, and returns a base64-encoded XDR transaction that invokes
- * `create_escrow(job_id: String, client: Address, amount: i128)` on the
+ * `create_escrow(job_id: String, client: Address, freelancer: Address, token: Address, amount: i128, ...)` on the
  * deployed Soroban contract.
  *
  * The returned XDR is ready to be signed by Freighter and submitted.
  */
 export async function buildCreateEscrowTx(
-  params: EscrowParams
+  params: EscrowParams,
 ): Promise<string> {
   const { clientPublicKey, jobId, budgetXlm } = params;
 
   if (!CONTRACT_ID) {
     throw new Error(
-      "NEXT_PUBLIC_CONTRACT_ID is not set. Add it to your .env.local file."
+      "NEXT_PUBLIC_CONTRACT_ID is not set. Add it to your .env.local file.",
     );
   }
 
@@ -111,9 +152,7 @@ export async function buildCreateEscrowTx(
   const simResponse = await server.simulateTransaction(tx);
 
   if (SorobanRpc.Api.isSimulationError(simResponse)) {
-    throw new Error(
-      `Soroban simulation failed: ${simResponse.error}`
-    );
+    throw new Error(`Soroban simulation failed: ${simResponse.error}`);
   }
 
   // Assemble the transaction (adds footprint, resource fees, etc.)
@@ -133,7 +172,7 @@ export async function buildCreateEscrowTx(
  * Returns the confirmed transaction hash.
  */
 export async function signAndSubmitEscrowTx(
-  preparedXdr: string
+  preparedXdr: string,
 ): Promise<EscrowResult> {
   const { signTransaction } = await getFreighter();
 
@@ -153,7 +192,7 @@ export async function signAndSubmitEscrowTx(
     (() => {
       const { Transaction } = require("@stellar/stellar-sdk");
       return new Transaction(signedTransaction, NETWORK_PASSPHRASE);
-    })()
+    })(),
   );
 
   if (sendResponse.status === "ERROR") {
@@ -179,7 +218,7 @@ export async function signAndSubmitEscrowTx(
 
   if (getResponse.status !== SorobanRpc.Api.GetTransactionStatus.SUCCESS) {
     throw new Error(
-      `Transaction did not succeed. Status: ${getResponse.status}`
+      `Transaction did not succeed. Status: ${getResponse.status}`,
     );
   }
 
@@ -191,7 +230,7 @@ export async function signAndSubmitEscrowTx(
 // ---------------------------------------------------------------------------
 
 export async function createEscrowOnChain(
-  params: EscrowParams
+  params: EscrowParams,
 ): Promise<EscrowResult> {
   const preparedXdr = await buildCreateEscrowTx(params);
   return signAndSubmitEscrowTx(preparedXdr);
