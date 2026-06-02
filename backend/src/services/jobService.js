@@ -241,20 +241,7 @@ function rowToJob(row) {
  *   clientAddress: 'GBX...',
  * });
  */
-async function createJob({
-  title,
-  description,
-  budget,
-  currency,
-  category,
-  skills,
-  deadline,
-  timezone,
-  clientAddress,
-  screeningQuestions,
-  milestones,
-  visibility,
-}) {
+async function createJob({ title, description, budget, currency, category, skills, deadline, timezone, clientAddress, screeningQuestions, visibility = "public" }) {
   validatePublicKey(clientAddress);
 
   if (!title || title.length < 10) {

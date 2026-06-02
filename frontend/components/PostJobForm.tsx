@@ -13,19 +13,13 @@
 "use client";
 
 import { useState } from "react";
-import type { Transaction } from "@stellar/stellar-sdk";
-import {
-  buildCreateEscrowTx,
-  signAndSubmitSorobanTx,
-  getXLMBalance,
-} from "@/lib/stellar";
-import { estimateSorobanFee } from "@/lib/sorobanFees";
-import FeeEstimationModal from "@/components/FeeEstimationModal";
-import { createJob, updateJobEscrowId, deleteJob } from "@/lib/api";
-import { usePriceContext } from "@/contexts/PriceContext";
+import { createJob, getJwtToken } from "@/lib/api";
+import { performSEP0010Auth } from "@/lib/wallet";
+import { createEscrowOnChain } from "@/lib/stellar";
 
-const DRAFT_STORAGE_KEY = "marketpay_post_job_draft";
-const AUTOSAVE_INTERVAL_MS = 30_000;
+// ---------------------------------------------------------------------------
+// Types
+// ---------------------------------------------------------------------------
 
 interface JobFormData {
   title: string;
@@ -35,9 +29,13 @@ interface JobFormData {
   category: string;
   skills: string;
   deadline: string;
-  visibility: "public" | "private" | "invite_only";
-  budgetXlm?: number;
-  milestones: { description: string; amount: string }[];
+  category: string;
+}
+
+interface PostJobFormProps {
+  publicKey: string;
+  initialCategory?: string;
+  suggestedFreelancer?: string;
 }
 
 type Step = "idle" | "posting" | "fee_modal" | "signing" | "complete" | "error";
@@ -173,6 +171,7 @@ export default function PostJobForm({
 }: PostJobFormProps) {
   const { xlmPriceUsd } = usePriceContext();
 
+export default function PostJobForm({ publicKey, initialCategory = "" }: PostJobFormProps) {
   const [form, setForm] = useState<JobFormData>({
     title: "",
     description: "",
@@ -181,8 +180,7 @@ export default function PostJobForm({
     category: initialCategory || VALID_CATEGORIES[0],
     skills: "",
     deadline: "",
-    visibility: "public",
-    milestones: [{ description: "Final delivery", amount: "50" }],
+    category: initialCategory,
   });
 
   const [step, setStep] = useState<Step>("idle");
@@ -270,44 +268,37 @@ export default function PostJobForm({
     let createdJobId: string | null = null;
 
     try {
-      // Step 1 — create job record in backend
-      const job = await createJob({
-        title: form.title.trim(),
-        description: form.description.trim(),
-        budget: form.budget,
-        currency: form.currency,
-        category: form.category,
-        skills: form.skills.split(",").map((s) => s.trim()).filter(Boolean),
-        deadline: form.deadline || undefined,
-        clientAddress: publicKey,
-        visibility: form.visibility,
-        milestones: form.milestones.map((milestone) => ({
-          description: milestone.description.trim(),
-          amount: parseFloat(milestone.amount).toFixed(7),
-        })),
-      });
-      createdJobId = job.id;
-      setJobId(job.id);
-
-      if (isMockMode) {
-        // Mock mode — skip fee modal and on-chain tx
-        console.info("[CONTRACT MOCK] create_escrow called", { jobId: job.id, budget: form.budget });
-        await new Promise((r) => setTimeout(r, 600));
-        const mockHash = `mock-escrow-${Date.now()}`;
-        await updateJobEscrowId(job.id, mockHash);
-        setTxHash(mockHash);
-        setStep("complete");
-        return;
+      // Ensure the user has a signed JWT (SEP-0010). If not, prompt Freighter to sign now.
+      if (!getJwtToken()) {
+        const { token, error } = await performSEP0010Auth(publicKey);
+        if (error || !token) {
+          throw new Error(error || "Authentication required to post job");
+        }
       }
 
-      // Step 2 — build Soroban tx (simulation only, no signing yet)
-      setStep("fee_modal");
-      const { Transaction } = await import("@stellar/stellar-sdk");
-      const xdr = await buildCreateEscrowTx({
+      // ── Step 1: POST to backend ──────────────────────────────────────────
+      const job = await createJob({
+        title: form.title,
+        description: form.description,
+        budget: String(form.budgetXlm),
+        currency: "XLM",
+        category: form.category,
+        skills: form.skills
+          .split(",")
+          .map((s) => s.trim())
+          .filter(Boolean),
+        deadline: form.deadline,
+        clientAddress: publicKey,
+      });
+      jobId = job.id as string;
+
+      // ── Step 2: Lock escrow on-chain ─────────────────────────────────────
+      setStepState({ current: "escrow", jobId });
+
+      const { txHash } = await createEscrowOnChain({
         clientPublicKey: publicKey,
-        jobId: job.id,
-        budget: parseFloat(form.budget),
-        budgetXlm: parseFloat(form.budget),
+        jobId,
+        budgetXlm: form.budgetXlm,
       });
       const tx = new Transaction(xdr, process.env.NEXT_PUBLIC_STELLAR_NETWORK === "mainnet"
         ? "Public Global Stellar Network ; September 2015"
