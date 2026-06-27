@@ -72,6 +72,8 @@ pub enum EscrowStatus {
     Refunded,
     /// Disputed — requires admin resolution (future feature)
     Disputed,
+    /// Admin-frozen — no operations allowed until unfrozen
+    Frozen,
 }
 
 #[contracttype]
@@ -523,9 +525,9 @@ impl MarketPayContract {
         );
     }
 
-    /// Client accepts a freelancer and marks work as in-progress.
-    pub fn start_work(env: Env, job_id: String, client: Address) {
-        client.require_auth();
+    /// Freelancer signals that they have started work.
+    pub fn start_work(env: Env, job_id: String, freelancer: Address) {
+        freelancer.require_auth();
 
         let mut escrow: Escrow = env
             .storage()
@@ -533,8 +535,8 @@ impl MarketPayContract {
             .get(&DataKey::Escrow(job_id.clone()))
             .expect("Escrow not found");
 
-        if escrow.client != client {
-            panic!("Only the client can start work");
+        if escrow.freelancer != freelancer {
+            panic!("Only the freelancer can start work");
         }
         if escrow.status != EscrowStatus::Locked {
             panic!("Escrow is not in Locked state");
@@ -975,6 +977,81 @@ impl MarketPayContract {
             .publish((symbol_short!("timeout"), admin), timeout_seconds);
     }
 
+    /// Admin freezes an escrow, blocking all further operations until unfrozen.
+    pub fn freeze_contract(env: Env, job_id: String, admin: Address) {
+        admin.require_auth();
+
+        let stored_admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .expect("Not initialized");
+        if stored_admin != admin {
+            panic!("Only admin can freeze a contract");
+        }
+
+        let mut escrow: Escrow = env
+            .storage()
+            .instance()
+            .get(&DataKey::Escrow(job_id.clone()))
+            .expect("Escrow not found");
+
+        if escrow.status == EscrowStatus::Released
+            || escrow.status == EscrowStatus::Refunded
+            || escrow.status == EscrowStatus::Frozen
+        {
+            panic!("Cannot freeze escrow in current status");
+        }
+
+        escrow.status = EscrowStatus::Frozen;
+        env.storage()
+            .instance()
+            .set(&DataKey::Escrow(job_id.clone()), &escrow);
+
+        env.events().publish(
+            (symbol_short!("frozen"), job_id.clone()),
+            (admin, escrow.client, escrow.freelancer),
+        );
+    }
+
+    /// Admin unfreezes a previously frozen escrow, restoring it to the target status.
+    pub fn unfreeze_contract(env: Env, job_id: String, admin: Address, target_status: EscrowStatus) {
+        admin.require_auth();
+
+        let stored_admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .expect("Not initialized");
+        if stored_admin != admin {
+            panic!("Only admin can unfreeze a contract");
+        }
+
+        let mut escrow: Escrow = env
+            .storage()
+            .instance()
+            .get(&DataKey::Escrow(job_id.clone()))
+            .expect("Escrow not found");
+
+        if escrow.status != EscrowStatus::Frozen {
+            panic!("Escrow is not frozen");
+        }
+
+        if target_status != EscrowStatus::Locked && target_status != EscrowStatus::InProgress {
+            panic!("Can only unfreeze to Locked or InProgress");
+        }
+
+        escrow.status = target_status;
+        env.storage()
+            .instance()
+            .set(&DataKey::Escrow(job_id.clone()), &escrow);
+
+        env.events().publish(
+            (symbol_short!("unfroz"), job_id.clone()),
+            (admin, escrow.client, escrow.freelancer),
+        );
+    }
+
     // ─── On-chain Message Notarization ─────────────────────────────────────
     //
     // Messages are stored off-chain on IPFS.  Only the IPFS CID is stored on-chain
@@ -1210,8 +1287,8 @@ impl MarketPayContract {
             panic!("Only participants can raise a dispute");
         }
 
-        if escrow.status == EscrowStatus::Released || escrow.status == EscrowStatus::Refunded {
-            panic!("Cannot dispute a resolved escrow");
+        if escrow.status == EscrowStatus::Released || escrow.status == EscrowStatus::Refunded || escrow.status == EscrowStatus::Frozen {
+            panic!("Cannot dispute a resolved or frozen escrow");
         }
         
         escrow.status = EscrowStatus::Disputed;
@@ -2258,8 +2335,8 @@ mod timeout_tests {
         let timeout_ledgers = 10u32;
         client.create_escrow(&job_id, &contract_client, &CreateEscrowParams { freelancer: freelancer.clone(), token: token_id.clone(), amount: 1000, milestones: None, timeout_ledgers: Some(timeout_ledgers), referrer: None });
 
-        // Start work changes status to InProgress
-        client.start_work(&job_id, &contract_client);
+        // Start work changes status to InProgress (freelancer starts work)
+        client.start_work(&job_id, &freelancer);
 
         let mut ledger_info = env.ledger().get();
         ledger_info.sequence_number += timeout_ledgers + 1;
@@ -2345,7 +2422,7 @@ mod regression_tests {
 
         let job_id = String::from_str(&env, "job1");
         contract_client.create_escrow(&job_id, &client.clone(), &CreateEscrowParams { freelancer: freelancer.clone(), token: token_id.clone(), amount: 1000, milestones: None, timeout_ledgers: None, referrer: None });
-        contract_client.start_work(&job_id, &client.clone());
+        contract_client.start_work(&job_id, &freelancer.clone());
 
         contract_client.release_escrow(&job_id, &client.clone());
 
@@ -2386,7 +2463,8 @@ mod regression_tests {
     fn test_partial_release() {
     let env = Env::default();
     env.mock_all_auths();
-    let id = env.register(MarketPayContract, ());
+    let id = env.register(Market2903
+PayContract, ());
     let contract_client = MarketPayContractClient::new(&env, &id);
 
     let admin = Address::generate(&env);
@@ -2571,7 +2649,7 @@ fn get_event_topic0_str(env: &Env, idx: u32) -> std::string::String {
             &CreateEscrowParams { freelancer: freelancer.clone(), token: token_id.clone(), amount: 500, milestones: None, timeout_ledgers: None, referrer: None },
         );
 
-        client.start_work(&job_id, &contract_client);
+        client.start_work(&job_id, &freelancer);
 
         assert!(
             get_event_topic0_str(&env, env.events().all().len() - 1).contains("work_strt"),
@@ -2587,7 +2665,7 @@ fn get_event_topic0_str(env: &Env, idx: u32) -> std::string::String {
             &job_id, &contract_client,
             &CreateEscrowParams { freelancer: freelancer.clone(), token: token_id.clone(), amount: 500, milestones: None, timeout_ledgers: None, referrer: None },
         );
-        client.start_work(&job_id, &contract_client);
+        client.start_work(&job_id, &freelancer);
 
         client.release_escrow(&job_id, &contract_client);
 
@@ -2642,7 +2720,7 @@ fn get_event_topic0_str(env: &Env, idx: u32) -> std::string::String {
             &job_id, &contract_client,
             &CreateEscrowParams { freelancer: freelancer.clone(), token: token_id.clone(), amount: 1000, milestones: Some(milestones), timeout_ledgers: None, referrer: None },
         );
-        client.start_work(&job_id, &contract_client);
+        client.start_work(&job_id, &freelancer);
 
         client.release_milestone(&job_id, &0u32, &contract_client);
 
@@ -2666,7 +2744,7 @@ fn get_event_topic0_str(env: &Env, idx: u32) -> std::string::String {
             "Missing escrow_cr after create_escrow",
         );
 
-        client.start_work(&job_id, &contract_client);
+        client.start_work(&job_id, &freelancer);
         assert!(
             get_event_topic0_str(&env, env.events().all().len() - 1).contains("work_strt"),
             "Missing work_strt after start_work",
