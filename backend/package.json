@@ -51,6 +51,8 @@
         "ws": "^8.20.0"
     },
     "devDependencies": {
+        "ajv": "^8.20.0",
+        "ajv-formats": "^3.0.1",
         "eslint": "^8.57.0",
         "jest": "^30.3.0",
         "nodemailer-mock": "^2.0.13",
